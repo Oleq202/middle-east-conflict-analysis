@@ -1,0 +1,530 @@
+---
+title: "Analysis of Middle Eastern Conflict Data"
+author: "Aleksander Widman & Szymon Jankowski"
+date: "2026-04-09"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: cosmo
+    self_contained: true
+---
+
+```{r header-logo, echo=FALSE, results='asis', warning=FALSE}
+library(htmltools)
+
+HTML('
+<div style="display: flex; justify-content: space-between; align-items: center; width: 100%; margin-bottom: 20px;">
+  <div>
+    <h1 style="margin-bottom: 0; border-bottom: none; font-weight: bold;">Exploratory Analysis of Middle Eastern Conflict Data</h1>
+    <br>
+    <p style="font-size: 1.2em; color: #7f8c8d; margin-top: 5px;">
+      Aleksander Widman & Szymon Jankowski | 2026-04-09
+    </p>
+  </div>
+  <img src="PP_znak_pe+ény_RGB.jpg" width="150" style="margin-left: 20px;">
+</div>
+<hr>
+')
+```
+
+```{css custom-css, echo=FALSE}
+#header {
+  display: none;
+}
+
+body {
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  line-height: 1.7;
+  color: #2c3e50;
+}
+h1, h2, h3 { color: #1a252f; }
+.tocify { border: none; }
+.tocify-header { font-size: 0.95em; }
+blockquote {
+  border-left: 4px solid #3498db;
+  padding: 0.4em 1em;
+  background: #f8f9fa;
+}
+pre { background: #f4f6f7; border: 1px solid #e0e4e8; }
+.plotly { margin-bottom: 1.5em; }
+html, body { overflow-x: hidden; max-width: 100%; }
+.main-container { max-width: 960px; margin: 0 auto; overflow-x: hidden; }
+.chart-container, .html-widget { max-width: 100%; }
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+```{r libraries}
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(tidyverse)
+library(arrow)
+library(plotly)
+library(scales)
+library(rnaturalearth)
+library(sf)
+```
+
+# Executive Summary
+
+This report presents a data analysis of conflict events recorded
+across the Middle East from 2014 to early 2026.
+The underlying dataset, captures weekly aggregated records of
+battles, explosions, protests, riots, strategic developments, and violence
+against civilians for 14 countries in the region.
+
+Key dimensions examined include:
+
+- **Geographic distribution** of events and population exposure.
+- **Event composition** by country and sub-event type.
+- **Casualty patterns**, distinguishing civilian from non-civilian fatalities.
+- **Temporal trends** in total and civilian fatalities across years.
+
+By examining over a decade of records, we have identified several critical regional shifts and patterns:
+
+* **Unprecedented Civilian Casualties**: While historical conflict zones like Syria and Iraq show declining trends, Palestine reached a catastrophic peak in 2024 with over 20,000 civilian fatalities.
+* **The 2026 Iran Surge**: The most recent data from early 2026 reveals a sudden and **massive** spike in fatalities in Iran, representing a radical departure from its relatively stable historical trend.
+* **Dominance of Remote Warfare**: Although peaceful protests are the most frequent event type, the combined volume of air/drone strikes and artillery attacks now surpasses direct armed clashes, signaling a shift toward high-intensity technological warfare.
+* **Concentrated vs. Dispersed Violence**: Fatalities and battles remain heavily concentrated in the Syria-Iraq corridor and Yemen, whereas civil unrest (protests and riots) is more geographically dispersed across Turkey, Iran, and Palestine.
+* **Stability Oases**: Despite regional volatility, countries such as Kuwait, Qatar, Oman, and the UAE maintained near-zero fatality rates and negligible event counts throughout the entire period.
+
+---
+
+# Data Preparation
+
+The primary dataset is loaded from .xslx files containing weekly
+aggregated conflict records.  Two cleaning steps are applied before analysis:
+
+1. **Handling missing values** – The `POPULATION_EXPOSURE` column contains
+   `NA` entries for some records.  These are imputed with the column-wise mean
+   so that downstream aggregations (sums, bubble sizes) are not distorted.
+2. **Date decomposition** – The `WEEK` column (a date field) is decomposed into
+   `YEAR`, `MONTH`, and `DAY` integer columns for flexible temporal grouping.
+   The original `WEEK` column and several administrative identifiers
+   (`REGION`, `DISORDER_TYPE`, `ID`) are then dropped to keep only
+   the variables used in the analysis. The `ADMIN1` column (province) is retained for use in hover tooltips.
+
+```{r data loading and preprocessing, cache=TRUE}
+df <- read_excel("conflict data/Middle-East_aggregated_data_up_to-2026-02-28.xlsx")
+df$POPULATION_EXPOSURE[is.na(df$POPULATION_EXPOSURE)] <- mean(df$POPULATION_EXPOSURE, na.rm = TRUE)
+df$YEAR <- as.integer(format(df$WEEK, "%Y"))
+df$MONTH <- as.integer(format(df$WEEK, "%m"))
+df$DAY <- as.integer(format(df$WEEK, "%d"))
+df <- df %>% select(-REGION, -DISORDER_TYPE, -ID, -WEEK)
+
+me_countries <- unique(df$COUNTRY)
+
+df_fatalities = read_excel("conflict data/number_of_reported_fatalities_by_country-year_as-of-06Mar2026.xlsx")
+df_civilian = read_excel("conflict data/number_of_reported_civilian_fatalities_by_country-year_as-of-06Mar2026.xlsx")
+```
+
+```{r color palettes}
+country_palette <- c(
+  "Turkey"                = "#e6194b",
+  "Syria"                 = "#f58231",
+  "Iraq"                  = "#ffe119",
+  "Iran"                  = "#3cb44b",
+  "Israel"                = "#42d4f4",
+  "Palestine"             = "#4363d8",
+  "Lebanon"               = "#911eb4",
+  "Jordan"                = "#f032e6",
+  "Saudi Arabia"          = "#a9a9a9",
+  "Yemen"                 = "#800000",
+  "Kuwait"                = "#469990",
+  "Oman"                  = "#dcbeff",
+  "Qatar"                 = "#9A6324",
+  "United Arab Emirates"  = "#aaffc3"
+)
+
+event_palette <- c(
+  "Battles"                    = "#e6194b",
+  "Explosions/Remote violence" = "#f58231",
+  "Protests"                   = "#3cb44b",
+  "Riots"                      = "#4363d8",
+  "Strategic developments"     = "#911eb4",
+  "Violence against civilians" = "#800000"
+)
+```
+
+---
+
+# Geographic Distribution
+
+The map below plots every recorded conflict location, with dot size scaled to
+total population exposure. Each panel shows one event type so that spatial
+patterns can be compared side by side.
+
+```{r geographic distribution scatter, fig.width=14, fig.height=12}
+world <- ne_countries(scale = "medium", returnclass = "sf")
+me_map <- world %>% filter(name %in% me_countries | admin %in% me_countries)
+
+p_geographic_distribution <- df %>%
+  group_by(EVENT_TYPE, CENTROID_LONGITUDE, CENTROID_LATITUDE, COUNTRY, ADMIN1) %>%
+  summarise(
+    TOTAL_EXPOSURE = sum(POPULATION_EXPOSURE, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  ggplot() +
+  geom_sf(data = me_map, fill = "#fcfcfc", color = "#bdc3c7", size = 0.3) +
+  geom_point(aes(
+    x = CENTROID_LONGITUDE,
+    y = CENTROID_LATITUDE,
+    color = COUNTRY,
+    size = TOTAL_EXPOSURE,
+    text  = paste0("<b>Country: ", COUNTRY, "<br>Place: ", ADMIN1, 
+                   "<br>Total Exposure: ", scales::label_number(accuracy = 1)(TOTAL_EXPOSURE))
+  ), alpha = 0.7) +
+  facet_wrap(~ EVENT_TYPE, ncol = 2) +
+  coord_sf(xlim = c(min(df$CENTROID_LONGITUDE) - 2, max(df$CENTROID_LONGITUDE) + 2),
+           ylim = c(min(df$CENTROID_LATITUDE) - 2, max(df$CENTROID_LATITUDE) + 2)) +
+  scale_size_continuous(range = c(1, 6), labels = scales::label_number(accuracy = 1)) +
+  scale_color_manual(values = country_palette) +
+  theme_minimal(base_size = 13) +
+  labs(
+    title = "Geographic Distribution of Conflict Events in the Middle East",
+    subtitle = "Overlayed on Country Borders | Dot size = total population exposure",
+    x = NULL,
+    y = NULL,
+    color = "Country",
+    size = "Total Exposure"
+  ) +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(face = "bold", size = 16),
+    strip.text = element_text(face = "bold", size = 12),
+    strip.background = element_rect(fill = "#f8f9fa", color = NA),
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(),
+    axis.text = element_blank(), 
+    axis.ticks = element_blank(),
+    panel.border = element_blank()
+  )
+
+ggplotly(p_geographic_distribution, tooltip='text') %>%
+  layout(
+    margin = list(b = 150, l = 50, r = 50, t = 80), 
+    legend = list(orientation = "h", xanchor = "center", x = 0.5)
+  )
+```
+
+### Observations
+
+Conflict events are not uniformly distributed across the region. Syria, Iraq, and Yemen form the densest clusters, with large bubble sizes indicating substantial population exposure due to instability of aforementioned countries. Battles and explosions concentrate along the Syria–Iraq corridor and in northern Yemen, while protests and riots are more evenly spread, appearing most commonly in Iran, Turkey, and Palestine. Strategic developments tend to scatter across a wider area with lower exposure values, suggesting they are less tied to dense population centres. Overall, the geographic pattern reflects long-running civil conflicts in Syria and Yemen as well as the Israeli–Palestinian tensions.
+
+---
+
+# Event Distribution
+
+This section breaks down the volume of conflict events — first by country, then
+by the type of event.
+
+## Total Events by Country
+
+```{r events by country, fig.width=12, fig.height=7}
+events_country_df <- df %>%
+  group_by(COUNTRY, EVENT_TYPE) %>%
+  summarise(TOTAL_EVENTS = sum(EVENTS), .groups = "drop") %>%
+  ungroup() %>%
+  mutate(COUNTRY = fct_reorder(COUNTRY, TOTAL_EVENTS, .fun = sum, .desc = TRUE))
+
+p_events_country <- events_country_df %>%
+  ggplot(aes(
+    x = COUNTRY,
+    y = TOTAL_EVENTS,
+    fill = EVENT_TYPE,
+    text = paste0("<b>Country: ", COUNTRY,
+                  "<br>Events: ", format(TOTAL_EVENTS, big.mark = " "),
+                  "<br>Event Type: ", EVENT_TYPE)
+  )) +
+  geom_bar(stat = "identity") +
+  scale_y_continuous(labels = scales::label_number(accuracy = 1)) + 
+  scale_fill_manual(values = event_palette) +
+  theme_minimal(base_size = 13) +
+  labs(
+    title = "Total Conflict Events by Country",
+    subtitle = "Colored by Event Type",
+    x = "Country",
+    y = "Number of Events",
+    fill = "Event Type"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 11),
+    axis.text.y = element_text(size = 11),
+    axis.title = element_text(size = 12),
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 12),
+    legend.position = "bottom",
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10),
+    panel.spacing = unit(1.2, "lines"),
+    plot.margin = margin(10, 10, 10, 10),
+    strip.text = element_text(face = "bold", size = 12),
+    strip.background = element_rect(fill = "#f0f0f0", color = NA)
+  )
+
+ggplotly(p_events_country, tooltip = "text") %>%
+  layout(
+    margin = list(b = 150, l = 50, r = 50, t = 80), 
+    legend = list(
+      orientation = "h", 
+      xanchor = "center",
+      x = 0.5,
+      y = -0.35
+    )
+  )
+```
+
+### Observations
+
+Syria, Yemen, and Palestine lead in total recorded events by a wide margin, with Syria showing the highest overall volume. While Syria and Yemen are heavily skewed towards battles and explosions, Palestine displays a significant concentration of riots and protests. Turkey and Iraq also show substantial activity; however, Turkey's profile is predominantly composed of protests and strategic developments, whereas Iraq sees a higher proportion of explosions and remote violence. In contrast, countries such as Kuwait, Qatar, Oman, and the United Arab Emirates report negligible event counts, consistent with their relatively stable internal security environments during the period.
+
+---
+
+## Events by Sub-Event Type
+
+```{r events by sub-event type, fig.width=12, fig.height=7}
+events_sub_df <- df %>%
+  group_by(SUB_EVENT_TYPE, EVENT_TYPE) %>%
+  summarise(TOTAL_EVENTS = sum(EVENTS), .groups = "drop") %>%
+  ungroup() %>%
+  mutate(SUB_EVENT_TYPE = fct_reorder(SUB_EVENT_TYPE, TOTAL_EVENTS, .desc = TRUE))
+
+p_events_sub <- events_sub_df %>%
+  ggplot(aes(
+    x = SUB_EVENT_TYPE,
+    y = TOTAL_EVENTS,
+    fill = EVENT_TYPE,
+    text = paste0("<b>Sub Event Type: ", SUB_EVENT_TYPE,
+                  "<br>Events: ", format(TOTAL_EVENTS, big.mark = " "),
+                  "<br>Event Type: ", EVENT_TYPE)
+  )) +
+  geom_bar(stat = "identity") +
+  scale_y_continuous(labels = scales::label_number(accuracy = 1)) +
+  scale_fill_manual(values = event_palette) +
+  theme_minimal(base_size = 13) +
+  labs(
+    title = "Total Conflict Events by Sub-Event Type",
+    subtitle = "Colored by main Event Type",
+    x = "Sub-Event Type",
+    y = "Number of Events",
+    fill = "Main Event Type"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 60, hjust = 1, vjust = 1, size = 11),
+    axis.text.y = element_text(size = 11),
+    axis.title = element_text(size = 12),
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 12),
+    legend.position = "bottom",
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10),
+    plot.margin = margin(10, 10, 10, 10),
+    strip.background = element_rect(fill = "#f0f0f0", color = NA)
+  )
+
+ggplotly(p_events_sub, tooltip = "text") %>%
+  layout(
+    margin = list(b = 150, l = 50, r = 50, t = 80), 
+    legend = list(
+      orientation = "h", 
+      xanchor = "center",
+      x = 0.5,
+      y = -1.2
+    )
+  )
+```
+
+### Observations
+
+Peaceful protest constitutes the single most frequent sub-event type by a substantial margin, highlighting that a significant portion of recorded regional activity is non-violent. This is followed immediately by high-frequency kinetic events, specifically Air/drone strike and Shelling/artillery/missile attack, which together surpass Armed clash in total volume. While non-violent protests lead the count, the prominent ranking of these remote explosive and aerial attacks underscores the high intensity of ongoing technological warfare. Less frequent sub-event types—including Mob violence, Attack, and Looting/property destruction—still represent thousands of recorded incidents, illustrating a highly diverse and complex conflict ecosystem.
+
+---
+
+# Casualty Analysis
+
+While event counts measure *activity*, fatality figures measure *severity*.
+This section examines who bears the human cost and how it has evolved over time.
+
+## Civilian vs. Non-Civilian Fatalities
+
+```{r fatalities type, fig.width=12, fig.height=7}
+fatalities_df <- df %>%
+  mutate(Fatality_Type = ifelse(EVENT_TYPE == "Violence against civilians", "Civilian", "Non-Civilian")) %>%
+  group_by(COUNTRY, Fatality_Type) %>%
+  summarise(FATALITIES = sum(FATALITIES), .groups = "drop") %>%
+  group_by(COUNTRY) %>%
+  mutate(TOTAL_FATALITIES = sum(FATALITIES)) %>%
+  ungroup() %>%
+  mutate(COUNTRY = fct_reorder(COUNTRY, TOTAL_FATALITIES, .desc = TRUE))
+
+p_fatalities <- fatalities_df %>%
+  ggplot(aes(
+    x = COUNTRY,
+    y = FATALITIES,
+    fill = Fatality_Type,
+    text = paste0("<b>Country: ", COUNTRY,
+                  "<br>Fatalities: ", format(FATALITIES, big.mark = " "),
+                  "<br>Type: ", Fatality_Type)
+  )) +
+  geom_bar(stat = "identity", position = "stack") +
+  scale_y_continuous(labels = scales::label_number(accuracy = 1)) +
+  scale_fill_manual(values = c(
+    "Civilian"     = "#e6194b",
+    "Non-Civilian" = "#4363d8"
+  )) +
+  theme_minimal(base_size = 13) +
+  labs(
+    title = "Total Fatalities by Country",
+    subtitle = "Breakdown of Civilian vs. Non-Civilian deaths",
+    x = "Country",
+    y = "Number of Fatalities",
+    fill = "Fatality Type"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 11),
+    axis.text.y = element_text(size = 11),
+    axis.title = element_text(size = 12),
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 12),
+    legend.position = "bottom",
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10),
+    plot.margin = margin(10, 10, 10, 10),
+    strip.background = element_rect(fill = "#f0f0f0", color = NA)
+  )
+
+ggplotly(p_fatalities, tooltip = "text") %>%
+  layout(
+    margin = list(b = 150, l = 50, r = 50, t = 80), 
+    legend = list(
+      orientation = "h", 
+      xanchor = "center",
+      x = 0.5,
+      y = -0.25
+    )
+  )
+```
+
+### Observations
+
+Yemen and Syria account for the vast majority of total fatalities in the region, significantly outpacing all other countries. Following them, Iraq and Palestine represent the next tier of severity. Across all high-conflict areas, non-civilian fatalities constitute the bulk of the data; however, the impact on non-combatants is most visible in Syria, Yemen, and Palestine, where the red civilian segments represent a substantial absolute loss of life. In contrast, countries like Iran, Turkey, and Saudi Arabia show much lower fatality totals, while Jordan, Oman, and Kuwait record almost no fatalities, mirroring their lower event counts.
+
+---
+
+## Annual Fatalities by Country
+
+```{r annual fatalities, fig.width=12, fig.height=7}
+p_annual <- df_fatalities %>%
+  filter(COUNTRY %in% me_countries) %>%
+  ggplot(aes(
+    x = YEAR,
+    y = FATALITIES,
+    color = COUNTRY,
+    group = COUNTRY,
+    text = paste0("<b>Country: ", COUNTRY,
+                  "<br>Year: ", YEAR,
+                  "<br>Fatalities: ", format(FATALITIES, big.mark = " "))
+  )) +
+  geom_line(linewidth = 1.2) +
+  scale_y_continuous(labels = scales::label_number(accuracy = 1)) +
+  geom_point(size = 2.5) +
+  scale_color_manual(values = country_palette) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 10)) +
+  theme_minimal(base_size = 13) +
+  labs(
+    title = "Annual Fatalities by Country",
+    subtitle = "Tracking the total number of fatalities over time",
+    x = "Year",
+    y = "Total Fatalities",
+    color = "Country"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 11),
+    axis.text.y = element_text(size = 11),
+    axis.title = element_text(size = 12),
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 12),
+    legend.position = "bottom",
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10),
+    plot.margin = margin(10, 10, 10, 10)
+  ) +
+  guides(color = guide_legend(nrow = 2, override.aes = list(size = 4)))
+
+ggplotly(p_annual, tooltip = "text") %>%
+  layout(
+    margin = list(b = 150, l = 50, r = 50, t = 80), 
+    legend = list(
+      orientation = "h", 
+      xanchor = "center",
+      x = 0.5,
+      y = -0.25
+    )
+  )
+```
+
+### Observations
+
+Data reveals significant, shifting peaks in conflict severity across the decade. Iraq (yellow) and Syria (orange) exhibit the most extreme spikes in the early years of the dataset, specifically around 2016–2017, followed by a steady decline as those specific conflict phases de-escalated. Yemen (dark red) shows a more prolonged period of high fatalities, peaking later in 2018 before gradually trending downward through 2025. Palestine (blue) displays a distinct and sharp surge starting in 2023, reaching its peak in 2024. Most notably, the 2026 data indicates a sudden, massive spike in fatalities for Iran (green), marking a significant departure from its previously flat trend. Other regional actors maintain consistently low or negligible fatality counts throughout the period.
+
+---
+
+## Annual Civilian Fatalities by Country
+
+```{r annual civilian fatalities, fig.width=12, fig.height=7}
+p_civilian <- df_civilian %>%
+  filter(COUNTRY %in% me_countries) %>%
+  ggplot(aes(
+    x = YEAR,
+    y = FATALITIES,
+    color = COUNTRY,
+    group = COUNTRY,
+    text = paste0("<b>Country: ", COUNTRY,
+                  "<br>Year: ", YEAR,
+                  "<br>Civilian Fatalities: ", format(FATALITIES, big.mark = " "))
+  )) +
+  geom_line(linewidth = 1.2) +
+  scale_y_continuous(labels = scales::label_number(accuracy = 1)) +
+  geom_point(size = 2.5) +
+  scale_color_manual(values = country_palette) +
+  scale_x_continuous(breaks = scales::pretty_breaks(n = 10)) +
+  theme_minimal(base_size = 13) +
+  labs(
+    title = "Annual Civilian Fatalities by Country",
+    subtitle = "Tracking violence directed explicitly at civilians over time",
+    x = "Year",
+    y = "Civilian Fatalities",
+    color = "Country"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 11),
+    axis.text.y = element_text(size = 11),
+    axis.title = element_text(size = 12),
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 12),
+    legend.position = "bottom",
+    legend.title = element_text(size = 11, face = "bold"),
+    legend.text = element_text(size = 10),
+    plot.margin = margin(10, 10, 10, 10)
+  ) +
+  guides(color = guide_legend(nrow = 2, override.aes = list(size = 4)))
+
+ggplotly(p_civilian, tooltip = "text") %>%
+  layout(
+    margin = list(b = 150, l = 50, r = 50, t = 80), 
+    legend = list(
+      orientation = "h", 
+      xanchor = "center",
+      x = 0.5,
+      y = -0.25
+    )
+  )
+```
+
+### Observations
+
+While the civilian trends share some similarities with total fatalities, the intensity and timing of civilian exposure show distinct patterns. Syria and Iraq recorded the highest annual civilian fatalities early in the period (2016–2017), followed by a sharp and steady decline. Palestine exhibits the most extreme escalation in the entire dataset, with civilian fatalities surging vertically in 2023 and peaking at over 20,000 in 2024, representing an unprecedented concentration of civilian loss. Yemen shows a more moderate but fluctuating trend, peaking much earlier in 2015 before gradually subsiding. Finally, Iran shows a late-period surge in 2026, marking its highest civilian toll in the recorded timeline. Across the region, the data confirms that while older conflict zones have seen a reduction in civilian deaths, new escalations have kept the total regional civilian exposure extremely high.
